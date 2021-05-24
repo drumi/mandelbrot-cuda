@@ -1,0 +1,9 @@
+.vscode
+*.gch
+*.o
+*.out
+*.exe
+*.bmp
+*.txt
+*.exp
+*.lib

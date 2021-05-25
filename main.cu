@@ -19,11 +19,11 @@ namespace
     {
         namespace FLAG
         {
-            char const* const FILE_NAME     = "-o";
             char const* const IMAGE_WIDTH   = "-w";
             char const* const IMAGE_HEIGHT  = "-h";
             char const* const GRANULARITY   = "-g";
             char const* const THREADS_COUNT = "-t";
+            char const* const BLOCKS_COUNT  = "-b";
             char const* const ZOOM_LEVEL    = "-z";
             char const* const POINT_ORIGIN  = "-p";
             char const* const ITERATIONS    = "-c";
@@ -37,18 +37,15 @@ namespace
             float const ZOOM_LEVEL = 1.0;
             int const BYTES_PER_PIXEL = 3;
             Complex const POINT_ORIGIN = {0, 0};
-
-            uint8_t const TINT_ON_ESCAPE = 32;
         }
 
         namespace THREADS
         {
             int const GRANULARITY = 1;
             int const ITERATIONS = 256;
-            int const COUNT = std::thread::hardware_concurrency();
+            int const COUNT = 128;
+            int const BLOCKS = 128;
         }
-
-        float const INFINITY_THRESHOLD = 4.0;
     }
 }
 
@@ -76,7 +73,8 @@ struct ProgramParameters
     int    threadsCount    = DEFAULT::THREADS::COUNT;
     int    granularity     = DEFAULT::THREADS::GRANULARITY;
     int    iterationsCount = DEFAULT::THREADS::ITERATIONS;
-    float zoomLevel       = DEFAULT::IMAGE::ZOOM_LEVEL;
+    int    blocksCount     = DEFAULT::THREADS::BLOCKS;
+    float  zoomLevel       = DEFAULT::IMAGE::ZOOM_LEVEL;
 
     char const* imageOutputName = DEFAULT::IMAGE::NAME;
     Complex pointOrigin = DEFAULT::IMAGE::POINT_ORIGIN;
@@ -101,11 +99,11 @@ struct ThreadParameters
 void printExecutingParameters(ProgramParameters const p)
 {
     std::cout << '\n'
-              << DEFAULT::FLAG::FILE_NAME     << " for file name in bmp format.  " << "Executing: " << DEFAULT::FLAG::FILE_NAME     <<" " << p.imageOutputName    << "\n"
               << DEFAULT::FLAG::IMAGE_WIDTH   << " for image width.              " << "Executing: " << DEFAULT::FLAG::IMAGE_WIDTH   <<" " << p.imageWidth         << "\n"
               << DEFAULT::FLAG::IMAGE_HEIGHT  << " for image height.             " << "Executing: " << DEFAULT::FLAG::IMAGE_HEIGHT  <<" " << p.imageHeight        << "\n"
               << DEFAULT::FLAG::GRANULARITY   << " for granularity.              " << "Executing: " << DEFAULT::FLAG::GRANULARITY   <<" " << p.granularity        << "\n"
-              << DEFAULT::FLAG::THREADS_COUNT << " for thread count.             " << "Executing: " << DEFAULT::FLAG::THREADS_COUNT <<" " << p.threadsCount       << "\n"
+              << DEFAULT::FLAG::THREADS_COUNT << " for threads per block.        " << "Executing: " << DEFAULT::FLAG::THREADS_COUNT <<" " << p.threadsCount       << "\n"
+              << DEFAULT::FLAG::BLOCKS_COUNT  << " for block count.              " << "Executing: " << DEFAULT::FLAG::BLOCKS_COUNT  <<" " << p.blocksCount        << "\n"
               << DEFAULT::FLAG::ZOOM_LEVEL    << " for image zoom.               " << "Executing: " << DEFAULT::FLAG::ZOOM_LEVEL    <<" " << p.zoomLevel          << "\n"
               << DEFAULT::FLAG::ITERATIONS    << " for complex iterations count. " << "Executing: " << DEFAULT::FLAG::ITERATIONS    <<" " << p.iterationsCount    << "\n"
               << DEFAULT::FLAG::POINT_ORIGIN  << " for image center point.       " << "Executing: " << DEFAULT::FLAG::POINT_ORIGIN  <<" " << p.pointOrigin.real << " " << p.pointOrigin.imag << "\n"
@@ -121,12 +119,7 @@ ProgramParameters handleInput(int argc, const char** argv)
     {
         std::string inputFlag(argv[i]);
 
-        if(inputFlag == DEFAULT::FLAG::FILE_NAME)
-        {
-            //result.imageOutputName = argv[i+1].c_str();
-            i += 2;
-        }
-        else if(inputFlag == DEFAULT::FLAG::IMAGE_WIDTH)
+        if(inputFlag == DEFAULT::FLAG::IMAGE_WIDTH)
         {
             result.imageWidth = atoi(argv[i+1]);
             i += 2;
@@ -136,6 +129,11 @@ ProgramParameters handleInput(int argc, const char** argv)
             result.imageHeight = atoi(argv[i+1]);
             i += 2;
         }
+        else if(inputFlag == DEFAULT::FLAG::BLOCKS_COUNT)
+        {
+            result.blocksCount = atoi(argv[i+1]);
+            i += 2;
+        }
         else if(inputFlag == DEFAULT::FLAG::GRANULARITY)
         {
             result.granularity = atoi(argv[i+1]);
@@ -143,7 +141,7 @@ ProgramParameters handleInput(int argc, const char** argv)
         }
         else if(inputFlag == DEFAULT::FLAG::THREADS_COUNT) 
         {
-           // result.threadsCount = atoi(argv[i+1]);
+            result.threadsCount = atoi(argv[i+1]);
             i += 2;;
         }
         else if(inputFlag == DEFAULT::FLAG::ZOOM_LEVEL) 
@@ -178,7 +176,7 @@ ThreadParameters generateThreadParameters(ProgramParameters const p)
     int const totalPixels = p.imageHeight * p.imageWidth;
 
     result.imageTotalSize     = totalPixels * DEFAULT::IMAGE::BYTES_PER_PIXEL; 
-    result.chunkSize          = (totalPixels / (p.granularity * p.threadsCount)) * DEFAULT::IMAGE::BYTES_PER_PIXEL;
+    result.chunkSize          = (totalPixels / (p.granularity * p.threadsCount * p.blocksCount)) * DEFAULT::IMAGE::BYTES_PER_PIXEL;
     result.chunksCount        = result.imageTotalSize / result.chunkSize;
     result.remainderChunkSize = result.imageTotalSize % result.chunkSize;
     
@@ -249,11 +247,12 @@ void computePortionOfImage(int const imageStartIndex, int const imageEndIndex, i
 __global__
 void computeImage(ProgramParameters const p, ThreadParameters const t, uint8_t* rawImage)
 {
+    int const totalThreads = p.threadsCount * p.blocksCount;
     int const threadId = blockIdx.x * blockDim.x + threadIdx.x;
-    int currentChunkNumber = threadId - p.threadsCount;
+    int currentChunkNumber = threadId - totalThreads;
 
     // Handle normal chunks
-    while ((currentChunkNumber += p.threadsCount) < t.chunksCount)
+    while ((currentChunkNumber += totalThreads) < t.chunksCount)
     {
         int const imageStartIndex = currentChunkNumber * t.chunkSize;
         int const imageEndIndex = (currentChunkNumber + 1) * t.chunkSize - 1;
@@ -275,13 +274,10 @@ int main(int const argc, const char** argv)
 {
     Clock const programClock;
 
-    ProgramParameters programParameters = handleInput(argc, argv);
-    programParameters.threadsCount = 16384;
+    ProgramParameters p = handleInput(argc, argv);
+    printExecutingParameters(p);
     
-    printExecutingParameters(programParameters);
-    
-    ThreadParameters const threadParameters = generateThreadParameters(programParameters);
-    ProgramParameters p = programParameters;
+    ThreadParameters const t = generateThreadParameters(p);
 
     uint8_t* rawImage = nullptr;
     uint8_t* rawImageHost = nullptr;
@@ -289,11 +285,11 @@ int main(int const argc, const char** argv)
     rawImageHost = new uint8_t[p.imageWidth * p.imageHeight * DEFAULT::IMAGE::BYTES_PER_PIXEL]();
     cudaMalloc(&rawImage, p.imageWidth * p.imageHeight * DEFAULT::IMAGE::BYTES_PER_PIXEL);
 
-    computeImage<<<128,128>>>(programParameters, threadParameters, rawImage);
+    computeImage<<<p.blocksCount, p.threadsCount>>>(p, t, rawImage);
 
     cudaMemcpy(rawImageHost, rawImage, p.imageWidth * p.imageHeight * DEFAULT::IMAGE::BYTES_PER_PIXEL, cudaMemcpyDeviceToHost);
 
-    BMPImage::save(programParameters.imageOutputName, programParameters.imageHeight, programParameters.imageWidth, rawImageHost);
+    BMPImage::save(p.imageOutputName, p.imageHeight, p.imageWidth, rawImageHost);
     
     cudaFree(rawImage);
     delete[] rawImageHost;
